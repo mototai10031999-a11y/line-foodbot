@@ -1,0 +1,17 @@
+{
+  "restaurantA": {
+    "name": "パン屋A",
+    "today": [
+      { "name": "パンA", "discount": "50%" },
+      { "name": "サンドイッチB", "discount": "30%" }
+    ]
+  },
+  "restaurantB": {
+    "name": "ベーカリーB",
+    "today": [
+      { "name": "クロワッサン", "discount": "40%" },
+      { "name": "ケーキ", "discount": "20%" }
+    ]
+  }
+}
+
