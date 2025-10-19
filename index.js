@@ -2,127 +2,134 @@ require('dotenv').config();
 const data = require('./data.json');
 const express = require('express');
 const { Client, middleware } = require('@line/bot-sdk');
+const multer = require('multer');
+const path = require('path');
+const fs = require('fs');
 
 const app = express();
 
+// LINE Bot設定
 const config = {
   channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN,
   channelSecret: process.env.LINE_CHANNEL_SECRET,
 };
-
 const client = new Client(config);
 
-// メモリ上予約管理
-const reservations = {};
-
-// 距離計算（Haversine formula）
-function getDistance(lat1, lng1, lat2, lng2) {
-  const toRad = deg => deg * Math.PI / 180;
-  const R = 6371; // km
-  const dLat = toRad(lat2 - lat1);
-  const dLng = toRad(lng2 - lng1);
-  const a = Math.sin(dLat/2) ** 2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng/2) ** 2;
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
-  return R * c;
-}
+// JSONファイル保存用フォルダとmulter設定
+const upload = multer({
+  dest: 'uploads/' // アップロード画像保存先
+});
+if (!fs.existsSync('uploads')) fs.mkdirSync('uploads');
 
 // LINE Webhook
 app.post('/webhook', middleware(config), (req, res) => {
-  Promise.all(req.body.events.map(handleEvent))
-    .then(r => res.json(r))
+  Promise
+    .all(req.body.events.map(handleEvent))
+    .then(result => res.json(result))
     .catch(err => {
       console.error(err);
       res.status(500).end();
     });
 });
 
+// イベント処理（全イベントログ＋テキスト返信）
 async function handleEvent(event) {
-  if (event.type !== 'message') return null;
+  // まずイベントを全部ログに出す
+  console.log('===== Event received =====');
+  console.log(JSON.stringify(event, null, 2));
+  console.log('==========================');
 
-  // ① 位置情報受信
-  if (event.message.type === 'location') {
-    const userLat = event.message.latitude;
-    const userLng = event.message.longitude;
-
-    // 近隣店舗を距離順で取得（3件まで）
-    const nearby = Object.keys(data)
-      .map(key => ({ key, distance: getDistance(userLat, userLng, data[key].lat, data[key].lng) }))
-      .sort((a,b) => a.distance - b.distance)
-      .slice(0, 3);
-
-    // クイックリプライで店舗選択
-    return client.replyMessage(event.replyToken, {
-      type: 'text',
-      text: '近くのお得なお店はこちらです。選択してください：',
-      quickReply: {
-        items: nearby.map(r => ({
-          type: 'action',
-          action: {
-            type: 'message',
-            label: data[r.key].name,
-            text: `お店 ${r.key}`
-          }
-        }))
-      }
-    });
+  // テキストメッセージ以外は返信せず終了
+  if (event.type !== 'message' || event.message.type !== 'text') {
+    return null;
   }
 
-  // ② テキストメッセージ処理
-  if (event.message.type === 'text') {
-    const msg = event.message.text.trim();
+  const msg = event.message.text.trim();
+if (msg === 'ID教えて') {
+  return client.replyMessage(event.replyToken, {
+    type: 'text',
+    text: `あなたのユーザーIDは: ${event.source.userId}`
+  });
+}
 
-    // 店舗選択 → 商品一覧
-    if (msg.startsWith('お店 ')) {
-      const key = msg.split(' ')[1];
-      if (!data[key]) return client.replyMessage(event.replyToken, { type:'text', text:'店舗がありません' });
+  // 「今日のおすすめ」メッセージ
+  if (msg.startsWith('今日のおすすめ')) {
+    const parts = msg.split(' ');
+    const key = parts[1];
 
-      // 商品ボタンテンプレート
-      const actions = data[key].today.map(item => ({
-        type: 'message',
-        label: `${item.name} ${item.discount}OFF`,
-        text: `予約 ${key} ${item.name} 1` // 1個で仮
-      }));
-
-      return client.replyMessage(event.replyToken, {
-        type: 'template',
-        altText: `${data[key].name} の商品一覧`,
-        template: {
-          type: 'buttons',
-          title: data[key].name,
-          text: '商品を選んでください',
-          actions
-        }
-      });
-    }
-
-    // 予約処理（簡易）
-    if (msg.startsWith('予約')) {
-      // 形式: 予約 [店舗名] [商品名] [数量]
-      const parts = msg.split(' ');
-      const key = parts[1];
-      const itemName = parts[2];
-      const qty = parts[3] || 1;
-
-      if (!data[key]) return client.replyMessage(event.replyToken, { type:'text', text:'店舗がありません' });
-      if (!reservations[key]) reservations[key] = [];
-      reservations[key].push({ userId: event.source.userId, item: itemName, qty });
-
+    if (!data[key]) {
       return client.replyMessage(event.replyToken, {
         type: 'text',
-        text: `${data[key].name} の ${itemName} を予約しました。数量: ${qty}`
+        text: '店舗情報が見つかりません。正しい店舗名を入力してください。',
       });
     }
 
-    // その他
+    const items = data[key].today.map(i => `・${i.name} ${i.discount}OFF`).join('\n');
     return client.replyMessage(event.replyToken, {
       type: 'text',
-      text: '位置情報を送るか、「お店 [店舗名]」または「予約 [店舗名] [商品名] [数量]」で送信してください。'
+      text: `${data[key].name} の今日の閉店前お得情報はこちらです：\n${items}`,
     });
   }
 
-  return null;
+  // 予約メッセージ
+  if (msg.startsWith('予約')) {
+    const parts = msg.split(' ');
+    const key = parts[1];
+    const num = parts[2];
+
+    if (!data[key] || !num) {
+      return client.replyMessage(event.replyToken, {
+        type: 'text',
+        text: '予約の形式が正しくありません。「予約 [店舗名] [人数]」で送信してください。',
+      });
+    }
+
+    if (!reservations[key]) reservations[key] = [];
+    reservations[key].push({ userId: event.source.userId, num });
+
+    return client.replyMessage(event.replyToken, {
+      type: 'text',
+      text: `${data[key].name} への予約を受け付けました。人数: ${num}`,
+    });
+  }
+
+  // 上記以外のメッセージ
+  return client.replyMessage(event.replyToken, {
+    type: 'text',
+    text: '「今日のおすすめ [店舗名]」か「予約 [店舗名] [人数]」で送信してください。',
+  });
 }
+
+
+// フォーム送信用ルート
+app.use(express.urlencoded({ extended: true }));
+
+app.post('/post', upload.single('image'), async (req, res) => {
+  const { name, price, discount_price, deadline } = req.body;
+  const image = req.file ? req.file.filename : null;
+
+  const posts = JSON.parse(fs.readFileSync('data.json'));
+  const newPost = { name, price, discount_price, deadline, image };
+
+  // とりあえず restaurantA に追加
+  if (!posts.restaurantA.today) posts.restaurantA.today = [];
+  posts.restaurantA.today.push(newPost);
+
+  fs.writeFileSync('data.json', JSON.stringify(posts, null, 2));
+
+  // LINE通知
+  try {
+    const notifyText = `新しい商品投稿があります：\n名前: ${name}\n通常価格: ${price}\n割引価格: ${discount_price}\n販売期限: ${deadline}`;
+    await client.pushMessage(process.env.LINE_ADMIN_USERID, { type: 'text', text: notifyText });
+  } catch (err) {
+    console.error('LINE通知エラー:', err);
+  }
+
+  res.send('投稿が完了しました！LINEに通知も送信されました。');
+});
 
 // サーバー起動
 const port = process.env.PORT || 3000;
-app.listen(port, () => console.log(`Server running at ${port}`));
+app.listen(port, () => {
+  console.log(`✅ Server running on port ${port}`);
+});
