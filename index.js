@@ -1,12 +1,12 @@
 require('dotenv').config();
-const data = require('./data.json');
 const express = require('express');
-const { Client, middleware } = require('@line/bot-sdk');
-const multer = require('multer');
-const path = require('path');
 const fs = require('fs');
+const multer = require('multer');
+const { Client, middleware } = require('@line/bot-sdk');
 
 const app = express();
+
+app.use(express.static('public'));
 
 // LINE Bot設定
 const config = {
@@ -15,16 +15,21 @@ const config = {
 };
 const client = new Client(config);
 
-// JSONファイル保存用フォルダとmulter設定
-const upload = multer({
-  dest: 'uploads/' // アップロード画像保存先
-});
+// JSONデータ初期化
+if (!fs.existsSync('data.json')) {
+  fs.writeFileSync('data.json', JSON.stringify({
+    restaurantA: { name: "レストランA", today: [] },
+    restaurantB: { name: "レストランB", today: [] }
+  }, null, 2));
+}
+
+// アップロード画像の設定
+const upload = multer({ dest: 'uploads/' });
 if (!fs.existsSync('uploads')) fs.mkdirSync('uploads');
 
 // LINE Webhook
 app.post('/webhook', middleware(config), (req, res) => {
-  Promise
-    .all(req.body.events.map(handleEvent))
+  Promise.all(req.body.events.map(handleEvent))
     .then(result => res.json(result))
     .catch(err => {
       console.error(err);
@@ -32,30 +37,32 @@ app.post('/webhook', middleware(config), (req, res) => {
     });
 });
 
+// 簡易予約管理
+const reservations = {};
+
 // イベント処理（全イベントログ＋テキスト返信）
 async function handleEvent(event) {
-  // まずイベントを全部ログに出す
   console.log('===== Event received =====');
   console.log(JSON.stringify(event, null, 2));
   console.log('==========================');
 
-  // テキストメッセージ以外は返信せず終了
-  if (event.type !== 'message' || event.message.type !== 'text') {
-    return null;
-  }
+  if (event.type !== 'message' || event.message.type !== 'text') return null;
 
   const msg = event.message.text.trim();
-if (msg === 'ID教えて') {
-  return client.replyMessage(event.replyToken, {
-    type: 'text',
-    text: `あなたのユーザーIDは: ${event.source.userId}`
-  });
-}
 
-  // 「今日のおすすめ」メッセージ
+  // 「ID教えて」でユーザーID返信（管理用）
+  if (msg === 'ID教えて') {
+    return client.replyMessage(event.replyToken, {
+      type: 'text',
+      text: `あなたのユーザーIDは: ${event.source.userId}`
+    });
+  }
+
+  // 「今日のおすすめ [店舗名]」
   if (msg.startsWith('今日のおすすめ')) {
     const parts = msg.split(' ');
     const key = parts[1];
+    const data = JSON.parse(fs.readFileSync('data.json'));
 
     if (!data[key]) {
       return client.replyMessage(event.replyToken, {
@@ -64,7 +71,7 @@ if (msg === 'ID教えて') {
       });
     }
 
-    const items = data[key].today.map(i => `・${i.name} ${i.discount}OFF`).join('\n');
+    const items = data[key].today.map(i => `・${i.name} ${i.discount_price}円 → ${i.price}円まで`).join('\n');
     return client.replyMessage(event.replyToken, {
       type: 'text',
       text: `${data[key].name} の今日の閉店前お得情報はこちらです：\n${items}`,
@@ -76,6 +83,7 @@ if (msg === 'ID教えて') {
     const parts = msg.split(' ');
     const key = parts[1];
     const num = parts[2];
+    const data = JSON.parse(fs.readFileSync('data.json'));
 
     if (!data[key] || !num) {
       return client.replyMessage(event.replyToken, {
@@ -93,13 +101,12 @@ if (msg === 'ID教えて') {
     });
   }
 
-  // 上記以外のメッセージ
+  // それ以外
   return client.replyMessage(event.replyToken, {
     type: 'text',
     text: '「今日のおすすめ [店舗名]」か「予約 [店舗名] [人数]」で送信してください。',
   });
 }
-
 
 // フォーム送信用ルート
 app.use(express.urlencoded({ extended: true }));
@@ -107,15 +114,15 @@ app.use(express.urlencoded({ extended: true }));
 app.post('/post', upload.single('image'), async (req, res) => {
   const { name, price, discount_price, deadline } = req.body;
   const image = req.file ? req.file.filename : null;
+  const data = JSON.parse(fs.readFileSync('data.json'));
 
-  const posts = JSON.parse(fs.readFileSync('data.json'));
   const newPost = { name, price, discount_price, deadline, image };
 
-  // とりあえず restaurantA に追加
-  if (!posts.restaurantA.today) posts.restaurantA.today = [];
-  posts.restaurantA.today.push(newPost);
+  // restaurantA に追加（例）
+  if (!data.restaurantA.today) data.restaurantA.today = [];
+  data.restaurantA.today.push(newPost);
 
-  fs.writeFileSync('data.json', JSON.stringify(posts, null, 2));
+  fs.writeFileSync('data.json', JSON.stringify(data, null, 2));
 
   // LINE通知
   try {
@@ -130,6 +137,4 @@ app.post('/post', upload.single('image'), async (req, res) => {
 
 // サーバー起動
 const port = process.env.PORT || 3000;
-app.listen(port, () => {
-  console.log(`✅ Server running on port ${port}`);
-});
+app.listen(port, () => console.log(`✅ Server running on port ${port}`));
